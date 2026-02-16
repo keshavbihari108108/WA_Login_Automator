@@ -10,6 +10,30 @@ def safe_sleep(duration):
     time.sleep(duration)
 
 
+def ensure_screen_unlocked(device):
+    device.screen_on()
+    time.sleep(0.5)
+
+    try:
+        info = device.info
+    except Exception:
+        info = {}
+
+    pkg = info.get("currentPackageName")
+    if pkg == "com.android.systemui":
+        w = info.get("displayWidth") or 1080
+        h = info.get("displayHeight") or 1920
+        device.swipe(w * 0.5, h * 0.8, w * 0.5, h * 0.3, 0.2)
+        time.sleep(1)
+
+    try:
+        if device.info.get("currentPackageName") == "com.android.systemui":
+            device.unlock()
+            time.sleep(0.5)
+    except Exception:
+        pass
+
+
 def enter_code_on_phone(device, code: str) -> bool:
     if not code:
         return False
@@ -246,8 +270,7 @@ if not pairing_code:
 # Connect to device
 try:
     d = u2.connect()
-    d.screen_on()
-    d.unlock()
+    ensure_screen_unlocked(d)
 except Exception as e:
     raise SystemExit(f"❌ Failed to connect to device: {e}")
 
