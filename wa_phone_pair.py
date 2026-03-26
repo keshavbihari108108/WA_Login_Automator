@@ -1,13 +1,35 @@
-import uiautomator2 as u2
 import time
 import re
 import subprocess
 import sys
 import xml.etree.ElementTree as ET
 
+try:
+    import uiautomator2 as u2
+except ImportError:
+    u2 = None
+
 
 def safe_sleep(duration):
     time.sleep(duration)
+
+
+def validate_pairing_code(code: str) -> str:
+    cleaned = re.sub(r"[^A-Za-z0-9]", "", (code or "")).upper()
+    if len(cleaned) != 8:
+        raise ValueError(
+            "Pairing code must contain exactly 8 letters/numbers (e.g. JH58-7TX2 or 1234-5678)."
+        )
+    return cleaned
+
+
+def check_adb_available():
+    try:
+        subprocess.check_output(["adb", "version"], stderr=subprocess.STDOUT)
+    except FileNotFoundError:
+        raise SystemExit("❌ adb is not installed or not in PATH.")
+    except subprocess.CalledProcessError as exc:
+        raise SystemExit(f"❌ adb is not available: {exc}")
 
 
 def ensure_screen_unlocked(device):
@@ -38,7 +60,7 @@ def enter_code_on_phone(device, code: str) -> bool:
     if not code:
         return False
 
-    clean_code = code.replace("-", "").strip()
+    clean_code = re.sub(r"[^A-Za-z0-9]", "", code).upper()
     print(f"📲 Entering code on phone: {code} (sending as {clean_code})")
 
     try:
@@ -144,12 +166,17 @@ def handle_app_chooser(device, pkg, user_id, timeout=6):
         if len(chooser) >= 2:
             chooser.sort(key=lambda x: x["y"])
 
-            if pkg == "com.whatsapp" and user_id != 0:
+            if pkg == "com.whatsapp.w4b":
+                app_name = "WhatsApp Business"
+            else:
+                app_name = "WhatsApp"
+
+            if user_id != 0:
                 target = chooser[1]
-                print("✅ Selecting DUAL WhatsApp (2nd option)")
+                print(f"✅ Selecting DUAL {app_name} (2nd option)")
             else:
                 target = chooser[0]
-                print("✅ Selecting NORMAL WhatsApp (1st option)")
+                print(f"✅ Selecting NORMAL {app_name} (1st option)")
 
             try:
                 device.click(target['x'], target['y'])
@@ -193,12 +220,16 @@ def wait_for_whatsapp(device, pkg, timeout=20):
     return False
 
 
-def smart_click(device, keywords, timeout=8):
+def smart_click(device, package_name, keywords, timeout=8):
     end = time.time() + timeout
 
     while time.time() < end:
         buttons = detect_buttons(device)
-        wa = [b for b in buttons if b.get("pkg") == PACKAGE or PACKAGE in (b.get("pkg") or "")]
+        wa = [
+            b
+            for b in buttons
+            if b.get("pkg") == package_name or package_name in (b.get("pkg") or "")
+        ]
 
         for b in wa:
             if b.get('res') and any(k in b['res'] for k in keywords):
@@ -249,7 +280,8 @@ def smart_click(device, keywords, timeout=8):
 def get_android_users():
     out = subprocess.check_output(
         ["adb", "shell", "pm", "list", "users"],
-        universal_newlines=True
+        universal_newlines=True,
+        stderr=subprocess.STDOUT,
     )
     users = []
     for line in out.splitlines():
@@ -259,122 +291,143 @@ def get_android_users():
     return users
 
 
-if len(sys.argv) > 1:
-    pairing_code = sys.argv[1].strip()
-else:
-    pairing_code = input("Enter pairing code (XXXX-XXXX): ").strip()
-
-if not pairing_code:
-    raise SystemExit("❌ Pairing code is required.")
-
-# Connect to device
-try:
-    d = u2.connect()
-    ensure_screen_unlocked(d)
-except Exception as e:
-    raise SystemExit(f"❌ Failed to connect to device: {e}")
-
-# Detect WhatsApp instances
-instances = []
-users = get_android_users()
-packages = ["com.whatsapp", "com.whatsapp.w4b"]
-
-for pkg in packages:
-    for user in users:
-        try:
-            subprocess.check_output(
-                ["adb", "shell", "pm", "path", "--user", str(user), pkg],
-                stderr=subprocess.DEVNULL
-            )
-            instances.append((pkg, user))
-        except subprocess.CalledProcessError:
-            pass
-
-if not instances:
-    raise SystemExit("❌ No WhatsApp found on device")
-
-print("\n📱 WhatsApp instances found:\n")
-for i, (pkg, user) in enumerate(instances, start=1):
+def format_instance_label(pkg, user):
     if pkg == "com.whatsapp" and user == 0:
-        label = "WhatsApp (Normal)"
-    elif pkg == "com.whatsapp" and user != 0:
-        label = f"WhatsApp Dual (user {user})"
-    elif pkg == "com.whatsapp.w4b":
-        label = "WhatsApp Business"
+        return "WhatsApp (Normal)"
+    if pkg == "com.whatsapp" and user != 0:
+        return f"WhatsApp Dual (user {user})"
+    if pkg == "com.whatsapp.w4b" and user == 0:
+        return "WhatsApp Business"
+    if pkg == "com.whatsapp.w4b" and user != 0:
+        return f"WhatsApp Business Dual (user {user})"
+    return f"{pkg} (user {user})"
+
+
+def main():
+    if u2 is None:
+        raise SystemExit("❌ Missing dependency: install with `pip install uiautomator2`.")
+
+    check_adb_available()
+
+    if len(sys.argv) > 1:
+        pairing_code_input = sys.argv[1].strip()
     else:
-        label = f"{pkg} (user {user})"
-    print(f"{i}. {label}")
+        pairing_code_input = input("Enter pairing code (XXXX-XXXX): ").strip()
 
-if len(sys.argv) > 2 and sys.argv[2].isdigit():
-    choice = int(sys.argv[2])
-    print(f"\n👉 Auto-selected WhatsApp index from arg: {choice}")
-else:
+    if not pairing_code_input:
+        raise SystemExit("❌ Pairing code is required.")
+
     try:
-        choice_input = input("\n👉 Select WhatsApp to open: ").strip()
-        if choice_input and choice_input[0].isdigit():
-            choice = int(re.match(r"\d+", choice_input).group())
-        else:
-            choice = int(choice_input)
-    except Exception:
-        choice = 1
-        print("⚠️ Input error, defaulting to 1")
+        pairing_code = validate_pairing_code(pairing_code_input)
+    except ValueError as exc:
+        raise SystemExit(f"❌ {exc}")
 
-if 1 <= choice <= len(instances):
-    PACKAGE, USER_ID = instances[choice - 1]
-else:
-    PACKAGE, USER_ID = instances[0]
-    print("⚠️ Invalid choice, defaulting to 1")
+    # Connect to device
+    try:
+        d = u2.connect()
+        ensure_screen_unlocked(d)
+    except Exception as e:
+        raise SystemExit(f"❌ Failed to connect to device: {e}")
 
-print(f"\n✅ Selected: {PACKAGE} (user {USER_ID})\n")
+    # Detect WhatsApp instances
+    instances = []
+    users = get_android_users()
+    packages = ["com.whatsapp", "com.whatsapp.w4b"]
 
-clear_recent_apps(d)
+    for pkg in packages:
+        for user in users:
+            try:
+                subprocess.check_output(
+                    ["adb", "shell", "pm", "path", "--user", str(user), pkg],
+                    stderr=subprocess.DEVNULL,
+                )
+                instances.append((pkg, user))
+            except subprocess.CalledProcessError:
+                pass
 
-print("🛑 Force-stopping WhatsApp")
-d.shell(f"am force-stop --user {USER_ID} {PACKAGE}")
-safe_sleep(1)
+    if not instances:
+        raise SystemExit("❌ No WhatsApp found on device")
 
-print("📱 Opening WhatsApp…")
-d.shell(f"am start --user {USER_ID} -n {PACKAGE}/com.whatsapp.Main")
+    print("\n📱 WhatsApp instances found:\n")
+    for i, (pkg, user) in enumerate(instances, start=1):
+        label = format_instance_label(pkg, user)
+        print(f"{i}. {label}")
 
-handle_app_chooser(d, PACKAGE, USER_ID)
+    if len(sys.argv) > 2 and sys.argv[2].isdigit():
+        choice = int(sys.argv[2])
+        print(f"\n👉 Auto-selected WhatsApp index from arg: {choice}")
+    else:
+        try:
+            choice_input = input("\n👉 Select WhatsApp to open: ").strip()
+            if choice_input and choice_input[0].isdigit():
+                choice = int(re.match(r"\d+", choice_input).group())
+            else:
+                choice = int(choice_input)
+        except Exception:
+            choice = 1
+            print("⚠️ Input error, defaulting to 1")
 
-if not wait_for_whatsapp(d, PACKAGE):
-    print("🔁 Retry opening WhatsApp once…")
-    d.shell(f"am start --user {USER_ID} -n {PACKAGE}/com.whatsapp.Main")
+    if 1 <= choice <= len(instances):
+        package_name, user_id = instances[choice - 1]
+    else:
+        package_name, user_id = instances[0]
+        print("⚠️ Invalid choice, defaulting to 1")
+
+    selected_label = format_instance_label(package_name, user_id)
+    print(f"\n✅ Selected: {selected_label} [{package_name} user {user_id}]\n")
+
+    clear_recent_apps(d)
+
+    print("🛑 Force-stopping WhatsApp")
+    d.shell(f"am force-stop --user {user_id} {package_name}")
+    safe_sleep(1)
+
+    print("📱 Opening WhatsApp…")
+    d.shell(f"am start --user {user_id} -n {package_name}/com.whatsapp.Main")
+
+    handle_app_chooser(d, package_name, user_id)
+
+    if not wait_for_whatsapp(d, package_name):
+        print("🔁 Retry opening WhatsApp once…")
+        d.shell(f"am start --user {user_id} -n {package_name}/com.whatsapp.Main")
+        safe_sleep(2)
+        if not wait_for_whatsapp(d, package_name):
+            raise SystemExit("❌ WhatsApp did not become ready")
+
     safe_sleep(2)
-    if not wait_for_whatsapp(d, PACKAGE):
-        raise SystemExit("❌ WhatsApp did not become ready")
 
-safe_sleep(2)
+    print("⋮ Opening menu")
+    if not smart_click(d, package_name, ["menuitem_overflow", "more"]):
+        raise SystemExit("Menu not found")
 
-print("⋮ Opening menu")
-if not smart_click(d, ["menuitem_overflow", "more"]):
-    raise SystemExit("Menu not found")
+    safe_sleep(1)
 
-safe_sleep(1)
+    print("🔗 Opening Linked devices")
+    if not smart_click(d, package_name, ["linked"]):
+        raise SystemExit("Linked devices not found")
 
-print("🔗 Opening Linked devices")
-if not smart_click(d, ["linked"]):
-    raise SystemExit("Linked devices not found")
+    safe_sleep(2)
 
-safe_sleep(2)
+    print("🟢 Clicking Link a device")
+    if not smart_click(d, package_name, ["link_device"]):
+        raise SystemExit("Link a device not found")
 
-print("🟢 Clicking Link a device")
-if not smart_click(d, ["link_device"]):
-    raise SystemExit("Link a device not found")
+    safe_sleep(2)
 
-safe_sleep(2)
+    print("📞 Clicking Link with phone number")
+    smart_click(d, package_name, ["phone"])
+    safe_sleep(3)
 
-print("📞 Clicking Link with phone number")
-smart_click(d, ["phone"])
-safe_sleep(3)
+    print(f"\n📱 Code received: {pairing_code_input}")
+    print("📲 Entering code on phone...")
 
-print(f"\n📱 Code received: {pairing_code}")
-print("📲 Entering code on phone...")
+    success = enter_code_on_phone(d, pairing_code)
+    if success:
+        print("✅ Code entered successfully. Waiting for login to complete...")
+        time.sleep(10)
+    else:
+        print("⚠️ Could not enter code automatically. Please enter it manually.")
 
-success = enter_code_on_phone(d, pairing_code)
-if success:
-    print("✅ Code entered successfully. Waiting for login to complete...")
-    time.sleep(10)
-else:
-    print("⚠️ Could not enter code automatically. Please enter it manually.")
+
+if __name__ == "__main__":
+    main()
